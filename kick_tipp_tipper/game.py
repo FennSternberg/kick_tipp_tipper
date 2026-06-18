@@ -152,10 +152,16 @@ class ActualOutcome:
 @dataclass(frozen=True)
 class ProbabilityDistribution:
     outcomes: tuple[ActualOutcome, ...]
+    inferred_score_probability: float = 0.0
+    inferred_score_count: int = 0
 
     def __post_init__(self) -> None:
         if not self.outcomes:
             raise GameError("A probability distribution needs at least one outcome.")
+        if self.inferred_score_probability < 0:
+            raise GameError("Inferred probability cannot be negative.")
+        if self.inferred_score_count < 0:
+            raise GameError("Inferred score count cannot be negative.")
         total = self.total_probability
         if total <= 0:
             raise GameError("A probability distribution must have positive mass.")
@@ -172,7 +178,12 @@ class ProbabilityDistribution:
         total = sum(outcome.probability for outcome in collected)
         if total <= 0:
             raise GameError("Cannot normalize outcomes with no probability mass.")
-        return cls(tuple(outcome.with_probability(outcome.probability / total) for outcome in collected))
+        return cls(
+            tuple(
+                outcome.with_probability(outcome.probability / total)
+                for outcome in collected
+            )
+        )
 
     @property
     def total_probability(self) -> float:
@@ -315,4 +326,3 @@ class PredictionOptimizer:
                 item.scoreline.away_goals,
             ),
         )
-

@@ -96,6 +96,31 @@ class OddsConverterTest(unittest.TestCase):
         self.assertAlmostEqual(probabilities[("score", ScoreLine(0, 0))], 0.125)
         self.assertAlmostEqual(probabilities[("bucket", "any other score")], 0.625)
 
+    def test_any_other_score_can_be_inferred_across_unquoted_scores(self) -> None:
+        market = BookmakerMarket(
+            bookmaker_key="book",
+            bookmaker_title="Book",
+            market_key="Correct Score",
+            outcomes=(
+                PricedOutcome("1-0", 5.0, scoreline=ScoreLine(1, 0)),
+                PricedOutcome("0-0", 10.0, scoreline=ScoreLine(0, 0)),
+                PricedOutcome("0-1", 10.0, scoreline=ScoreLine(0, 1)),
+                PricedOutcome("Any Other Score", 2.0),
+            ),
+        )
+
+        distribution = OddsConverter().distribution_for_market(
+            market,
+            infer_other_scores=True,
+            inferred_max_goals=2,
+        )
+
+        self.assertAlmostEqual(distribution.total_probability, 1.0)
+        self.assertAlmostEqual(distribution.unknown_bucket_probability, 0.0)
+        self.assertGreater(distribution.inferred_score_probability, 0.0)
+        self.assertGreater(distribution.inferred_score_count, 0)
+        self.assertIn(ScoreLine(2, 1), distribution.exact_scorelines)
+
     def test_american_odds_can_be_converted(self) -> None:
         converter = OddsConverter()
 
@@ -142,8 +167,12 @@ class BovadaProviderTest(unittest.TestCase):
         market = FakeBovadaProvider().correct_score_market("fixture-1")
 
         self.assertEqual(market.bookmaker_market.bookmaker_key, "bovada")
+        self.assertEqual(
+            market.quoted_scorelines,
+            (ScoreLine(0, 0), ScoreLine(0, 1), ScoreLine(1, 0)),
+        )
 
-        distribution = market.to_probability_distribution()
+        distribution = market.to_probability_distribution(infer_other_scores=False)
         identities = {outcome.identity for outcome in distribution.outcomes}
 
         self.assertIn(("score", ScoreLine(1, 0)), identities)
@@ -151,6 +180,17 @@ class BovadaProviderTest(unittest.TestCase):
         self.assertIn(("score", ScoreLine(0, 1)), identities)
         self.assertIn(("bucket", "any other score"), identities)
         self.assertAlmostEqual(distribution.total_probability, 1.0)
+
+    def test_correct_score_market_can_infer_any_other_scores(self) -> None:
+        market = FakeBovadaProvider().correct_score_market("fixture-1")
+
+        distribution = market.to_probability_distribution(
+            infer_other_scores=True,
+            inferred_max_goals=2,
+        )
+
+        self.assertEqual(distribution.unknown_bucket_probability, 0.0)
+        self.assertGreater(distribution.inferred_score_count, 0)
 
     def test_lists_bovada_available_markets(self) -> None:
         markets = FakeBovadaProvider().available_markets("fixture-1")

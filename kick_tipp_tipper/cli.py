@@ -96,6 +96,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Evaluate every score line from 0-0 up to N-N instead of only quoted scores.",
     )
+    expected.add_argument(
+        "--tail-max-goals",
+        type=int,
+        default=10,
+        help="When inferring other scores, allocate them across unquoted score lines up to N-N.",
+    )
+    expected.add_argument(
+        "--infer-other-scores",
+        action="store_true",
+        help="Estimate score lines inside the any-other-score bucket and include them in optimization.",
+    )
     expected.set_defaults(handler=_handle_expected_points)
 
     return parser
@@ -161,10 +172,16 @@ def _handle_expected_points(
     query = combine_fixture_query(args.fixture)
     fixture_id = _resolve_fixture_id(query, provider.upcoming_fixtures())
     market = provider.correct_score_market(fixture_id)
-    distribution = market.to_probability_distribution()
+    if args.tail_max_goals < 0:
+        raise GameError("--tail-max-goals cannot be negative.")
+    distribution = market.to_probability_distribution(
+        infer_other_scores=args.infer_other_scores,
+        inferred_max_goals=args.tail_max_goals,
+    )
     optimizer = PredictionOptimizer()
     rankings = optimizer.rank_predictions(
         distribution,
+        candidates=None if args.max_goals is not None else market.quoted_scorelines,
         max_goals=args.max_goals,
     )
     if args.top is not None:
@@ -178,6 +195,8 @@ def _handle_expected_points(
         rankings=rankings,
         unknown_probability=distribution.unknown_bucket_probability,
         partial_probability=distribution.partial_bucket_probability,
+        inferred_probability=distribution.inferred_score_probability,
+        inferred_count=distribution.inferred_score_count,
         timezone_info=timezone_info,
         stdout=stdout,
     )
@@ -256,6 +275,8 @@ def _print_expectations(
     rankings,
     unknown_probability: float,
     partial_probability: float,
+    inferred_probability: float,
+    inferred_count: int,
     timezone_info: tzinfo,
     stdout: TextIO,
 ) -> None:
@@ -266,6 +287,11 @@ def _print_expectations(
     if unknown_probability:
         print(
             f"Unmodelled other-score bucket included in normalisation: {unknown_probability:.1%}",
+            file=stdout,
+        )
+    if inferred_probability:
+        print(
+            f"Inferred other-score bucket allocated across {inferred_count} unquoted score lines: {inferred_probability:.1%}",
             file=stdout,
         )
     if partial_probability:

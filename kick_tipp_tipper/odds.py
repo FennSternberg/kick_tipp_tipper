@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import re
 from typing import Iterable, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -81,8 +82,35 @@ class CorrectScoreMarket:
     fixture: Fixture
     bookmaker_market: BookmakerMarket
 
-    def to_probability_distribution(self) -> ProbabilityDistribution:
-        return OddsConverter().distribution_for_market(self.bookmaker_market)
+    @property
+    def quoted_scorelines(self) -> tuple[ScoreLine, ...]:
+        scorelines = {
+            outcome.scoreline
+            for outcome in self.bookmaker_market.outcomes
+            if outcome.scoreline is not None
+        }
+        return tuple(
+            sorted(
+                scorelines,
+                key=lambda scoreline: (
+                    scoreline.home_goals + scoreline.away_goals,
+                    scoreline.home_goals,
+                    scoreline.away_goals,
+                ),
+            )
+        )
+
+    def to_probability_distribution(
+        self,
+        *,
+        infer_other_scores: bool = False,
+        inferred_max_goals: int = 10,
+    ) -> ProbabilityDistribution:
+        return OddsConverter().distribution_for_market(
+            self.bookmaker_market,
+            infer_other_scores=infer_other_scores,
+            inferred_max_goals=inferred_max_goals,
+        )
 
 
 class OddsConverter:
@@ -102,10 +130,17 @@ class OddsConverter:
         raise OddsError(f"Unsupported odds format: {odds_format!r}.")
 
     def distribution_for_market(
-        self, market: BookmakerMarket, *, odds_format: str = "decimal"
+        self,
+        market: BookmakerMarket,
+        *,
+        odds_format: str = "decimal",
+        infer_other_scores: bool = False,
+        inferred_max_goals: int = 10,
     ) -> ProbabilityDistribution:
         if not market.outcomes:
             raise OddsError("The selected market has no outcomes.")
+        if inferred_max_goals < 0:
+            raise OddsError("inferred_max_goals cannot be negative.")
 
         raw_outcomes: dict[tuple[str, object], ActualOutcome] = {}
         raw_probabilities: dict[tuple[str, object], float] = {}
@@ -122,12 +157,167 @@ class OddsConverter:
         if total <= 0:
             raise OddsError("The selected market has no positive probability mass.")
 
-        return ProbabilityDistribution(
+        distribution = ProbabilityDistribution(
             tuple(
                 raw_outcomes[key].with_probability(raw_probability / total)
                 for key, raw_probability in raw_probabilities.items()
             )
         )
+        if not infer_other_scores:
+            return distribution
+        return AnyOtherScoreInferer(max_goals=inferred_max_goals).expand(distribution)
+
+
+class AnyOtherScoreInferer:
+    def __init__(
+        self,
+        *,
+        max_goals: int = 10,
+        min_expected_goals: float = 0.1,
+        max_expected_goals: float = 5.5,
+        grid_step: float = 0.05,
+    ) -> None:
+        if max_goals < 0:
+            raise OddsError("max_goals cannot be negative.")
+        self.max_goals = max_goals
+        self.min_expected_goals = min_expected_goals
+        self.max_expected_goals = max_expected_goals
+        self.grid_step = grid_step
+
+    def expand(self, distribution: ProbabilityDistribution) -> ProbabilityDistribution:
+        exact_outcomes = [
+            outcome for outcome in distribution.outcomes if outcome.scoreline is not None
+        ]
+        other_outcomes = [
+            outcome
+            for outcome in distribution.outcomes
+            if outcome.scoreline is None and _is_generic_any_other_score(outcome.label)
+        ]
+        retained_bucket_outcomes = [
+            outcome
+            for outcome in distribution.outcomes
+            if outcome.scoreline is None and not _is_generic_any_other_score(outcome.label)
+        ]
+        other_probability = sum(outcome.probability for outcome in other_outcomes)
+
+        if not exact_outcomes or other_probability <= 0:
+            return distribution
+
+        quoted_scorelines = {outcome.scoreline for outcome in exact_outcomes}
+        highest_quoted_goal = max(
+            max(scoreline.home_goals, scoreline.away_goals)
+            for scoreline in quoted_scorelines
+            if scoreline is not None
+        )
+        max_goals = max(self.max_goals, highest_quoted_goal)
+        candidate_scorelines = [
+            ScoreLine(home_goals, away_goals)
+            for home_goals in range(max_goals + 1)
+            for away_goals in range(max_goals + 1)
+            if ScoreLine(home_goals, away_goals) not in quoted_scorelines
+        ]
+        if not candidate_scorelines:
+            return distribution
+
+        home_expected_goals, away_expected_goals = self._fit_expected_goals(
+            exact_outcomes
+        )
+        candidate_weights = {
+            scoreline: _poisson_probability(
+                scoreline.home_goals,
+                home_expected_goals,
+            )
+            * _poisson_probability(scoreline.away_goals, away_expected_goals)
+            for scoreline in candidate_scorelines
+        }
+        candidate_total = sum(candidate_weights.values())
+        if candidate_total <= 0:
+            return distribution
+
+        inferred_outcomes = [
+            ActualOutcome.exact(
+                scoreline,
+                other_probability * weight / candidate_total,
+            )
+            for scoreline, weight in candidate_weights.items()
+        ]
+
+        return ProbabilityDistribution(
+            tuple(exact_outcomes + retained_bucket_outcomes + inferred_outcomes),
+            inferred_score_probability=other_probability,
+            inferred_score_count=len(inferred_outcomes),
+        )
+
+    def _fit_expected_goals(
+        self, exact_outcomes: Sequence[ActualOutcome]
+    ) -> tuple[float, float]:
+        exact_probability = sum(outcome.probability for outcome in exact_outcomes)
+        if exact_probability <= 0:
+            raise OddsError("Cannot infer other scores without exact-score probability.")
+
+        observed_conditional = {
+            outcome.scoreline: outcome.probability / exact_probability
+            for outcome in exact_outcomes
+            if outcome.scoreline is not None
+        }
+        candidates = [
+            self.min_expected_goals + index * self.grid_step
+            for index in range(
+                int(
+                    round(
+                        (self.max_expected_goals - self.min_expected_goals)
+                        / self.grid_step
+                    )
+                )
+                + 1
+            )
+        ]
+
+        best_loss: float | None = None
+        best_expected_goals = (1.0, 1.0)
+        for home_expected_goals in candidates:
+            home_probabilities = {
+                scoreline.home_goals: _poisson_probability(
+                    scoreline.home_goals,
+                    home_expected_goals,
+                )
+                for scoreline in observed_conditional
+            }
+            for away_expected_goals in candidates:
+                model_weights = {
+                    scoreline: home_probabilities[scoreline.home_goals]
+                    * _poisson_probability(
+                        scoreline.away_goals,
+                        away_expected_goals,
+                    )
+                    for scoreline in observed_conditional
+                }
+                model_total = sum(model_weights.values())
+                if model_total <= 0:
+                    continue
+                loss = -sum(
+                    observed_probability
+                    * math.log(max(model_weights[scoreline] / model_total, 1e-15))
+                    for scoreline, observed_probability in observed_conditional.items()
+                )
+                if best_loss is None or loss < best_loss:
+                    best_loss = loss
+                    best_expected_goals = (home_expected_goals, away_expected_goals)
+
+        return best_expected_goals
+
+
+def _poisson_probability(goals: int, expected_goals: float) -> float:
+    return (
+        math.exp(-expected_goals)
+        * expected_goals**goals
+        / math.factorial(goals)
+    )
+
+
+def _is_generic_any_other_score(label: str) -> bool:
+    text = label.casefold()
+    return "any other" in text and "score" in text
 
 class CorrectScoreOutcomeParser:
     _EXACT_SCORE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*[-:]\s*(\d{1,2})(?!\d)")

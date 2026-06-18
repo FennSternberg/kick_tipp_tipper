@@ -98,6 +98,28 @@ class CliTest(unittest.TestCase):
         self.assertIn("1-0", output)
         self.assertLess(output.index("1-0"), output.index("0-0"))
 
+    def test_expected_points_command_can_infer_other_scores(self) -> None:
+        stdout = io.StringIO()
+
+        exit_code = execute(
+            [
+                "expected-points",
+                "early",
+                "--timezone",
+                "UTC",
+                "--infer-other-scores",
+                "--tail-max-goals",
+                "2",
+            ],
+            provider_factory=fake_provider_factory,
+            stdout=stdout,
+        )
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Inferred other-score bucket", output)
+        self.assertNotIn("Unmodelled other-score bucket", output)
+
     def test_expected_points_command_accepts_chronological_fixture_number(self) -> None:
         stdout = io.StringIO()
         provider = FakeProvider()

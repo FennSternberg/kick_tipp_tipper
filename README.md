@@ -47,6 +47,12 @@ fixture, `2` is the fixture after that, and so on:
 python -m kick_tipp_tipper.cli expected-points 1 --top 10
 ```
 
+Optionally infer score lines inside Bovada's generic "Any other score" bucket:
+
+```powershell
+python -m kick_tipp_tipper.cli expected-points 1 --top 10 --infer-other-scores
+```
+
 Check which betting markets Bovada exposes for a fixture:
 
 ```powershell
@@ -58,13 +64,20 @@ Useful options:
 - `--bovada-path`: Bovada competition path. Defaults to
   `soccer/fifa-world-cup/fifa-world-cup-matches`.
 - `--max-goals`: evaluate every prediction from `0-0` to `N-N` instead of only
-  score lines quoted by the market.
+  score lines quoted by the market. Without this, recommendations are limited
+  to quoted score lines even when `--infer-other-scores` is enabled.
+- `--infer-other-scores`: split the any-other-score probability across
+  estimated unquoted score lines and include those estimates in optimization.
+- `--tail-max-goals`: when using `--infer-other-scores`, allocate the
+  any-other-score bucket across unquoted score lines up to `N-N`. Defaults to
+  `10`.
 - `--timezone`: display timezone. Defaults to `Europe/London`.
 
 The odds normalizer includes "Any Other Score" prices in the probability total.
-If an other-score bucket has a known result, such as "Any Other Home Win", it
-can contribute result points. A generic "Any Other Score" bucket is normalized
-but not assigned to exact-score, goal-difference, or result points.
+By default, a generic "Any Other Score" bucket is normalized but not assigned to
+exact-score, goal-difference, or result points. With `--infer-other-scores`, the
+tool keeps the bucket's total market probability and estimates how to distribute
+that mass across unquoted score lines.
 
 ## Tests
 
