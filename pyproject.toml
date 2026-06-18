@@ -1,0 +1,11 @@
+[project]
+name = "kick-tipp-tipper"
+version = "0.1.0"
+description = "Command line helper for optimizing Kicktipp World Cup score predictions."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+kick-tipp-tipper = "kick_tipp_tipper.cli:main"
+
