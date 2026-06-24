@@ -16,9 +16,11 @@ The default provider is Bovada's public football JSON feed, so no paid API key
 is required. The tool uses only the Python standard library.
 
 The optimizer needs an actual exact-score betting market. It does not estimate
-or invent score probabilities from winner/total markets. If Bovada does
-not expose an exact-score market and an any-other-score bucket for a fixture,
-`expected-points` fails.
+or invent score probabilities from winner/total markets. If Bovada does not
+expose an exact-score market for a fixture, `expected-points` fails. If Bovada
+returns exact-score odds but omits the any-other-score bucket, the tool prints a
+warning and falls back to an estimated bucket when a positive residual
+probability is available.
 
 ## Usage
 
@@ -73,11 +75,11 @@ Useful options:
   `10`.
 - `--timezone`: display timezone. Defaults to `Europe/London`.
 
-The odds normalizer includes "Any Other Score" prices in the probability total.
-By default, a generic "Any Other Score" bucket is normalized but not assigned to
-exact-score, goal-difference, or result points. With `--infer-other-scores`, the
-tool keeps the bucket's total market probability and estimates how to distribute
-that mass across unquoted score lines.
+The odds normalizer includes "Any Other Score" prices in the probability total
+when Bovada returns them. By default, a generic "Any Other Score" bucket is
+normalized but not assigned to exact-score, goal-difference, or result points.
+With `--infer-other-scores`, the tool keeps the bucket's total probability and
+estimates how to distribute that mass across unquoted score lines.
 
 ## How it works
 
@@ -90,9 +92,9 @@ into a raw implied probability:
 implied probability = 1 / decimal odds
 ```
 
-Those raw probabilities include the quoted exact scores and the generic
-`Any other score` outcome. They are then normalised so the whole market sums to
-one:
+Those raw probabilities include the quoted exact scores and, when Bovada returns
+it, the generic `Any other score` outcome. They are then normalised so the whole
+market sums to one:
 
 ```text
 normalised probability = raw probability / sum(all raw market probabilities)
@@ -101,6 +103,21 @@ normalised probability = raw probability / sum(all raw market probabilities)
 Including `Any other score` in that total matters because otherwise the quoted
 low-score outcomes would be treated as if they covered every possible match
 score. They do not.
+
+If Bovada omits the `Any other score` bucket, the tool tries one explicit
+fallback before giving up on the tail:
+
+```text
+estimated any-other-score probability =
+    1 - sum(raw implied probabilities for quoted exact scores)
+```
+
+That estimated bucket is only used when the residual is positive. This is an
+assumption, not a bookmaker quote, because the quoted exact-score prices include
+bookmaker margin. The CLI prints a warning whenever this fallback is used. If
+the quoted exact-score probabilities already sum to one or more, there is no
+positive residual to use; in that case the tool warns and normalises the quoted
+exact scores only.
 
 ### Calculating expected points
 
@@ -143,9 +160,11 @@ included in the normalisation, but it is left as an unknown bucket. Because it
 has no exact score attached to it, it cannot contribute exact-score,
 goal-difference, or result points.
 
-With `--infer-other-scores`, the tool keeps the market's actual
-`Any other score` probability and estimates how to split that probability across
-individual unquoted score lines.
+With `--infer-other-scores`, the tool keeps the available `Any other score`
+probability and estimates how to split that probability across individual
+unquoted score lines. Usually that probability comes from Bovada's market. If
+the bucket was missing and the residual fallback was possible, it comes from the
+estimated residual instead.
 
 The split uses a simple independent Poisson model:
 
@@ -178,9 +197,12 @@ inferred P(unquoted score) =
   / sum(Poisson weights for all inferred unquoted scores)
 ```
 
-This means the tool is not inventing the size of the tail. The bookmaker market
-provides the total `Any other score` probability; the Poisson model only decides
-how to divide that total across particular unquoted scores.
+When Bovada returns an any-other-score price, the tool is not inventing the size
+of the tail: the bookmaker market provides the total `Any other score`
+probability, and the Poisson model only decides how to divide that total across
+particular unquoted scores. When Bovada omits the bucket, the residual fallback
+does estimate the size of the tail, and the warning in the CLI output marks that
+weaker assumption.
 
 The inference is optional because it is still a model assumption. It is useful
 when you want the optimizer to account for high-scoring or unusual results that

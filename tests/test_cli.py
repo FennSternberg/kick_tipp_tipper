@@ -17,6 +17,7 @@ from kick_tipp_tipper.odds import (
 class FakeProvider:
     def __init__(self) -> None:
         self.requested_fixture_ids: list[str] = []
+        self.market_warnings: tuple[str, ...] = ()
         self.fixtures = [
             Fixture(
                 fixture_id="late",
@@ -50,6 +51,7 @@ class FakeProvider:
                     PricedOutcome("Any Other Score", 6.0),
                 ),
             ),
+            warnings=self.market_warnings,
         )
 
     def available_markets(self, fixture_id: str) -> list[BookmakerAvailableMarkets]:
@@ -133,6 +135,26 @@ class CliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(provider.requested_fixture_ids, ["early"])
         self.assertIn("England v France", stdout.getvalue())
+
+    def test_expected_points_command_prints_market_warnings_to_stderr(self) -> None:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        provider = FakeProvider()
+        provider.market_warnings = ("Estimated missing any-other-score bucket.",)
+
+        exit_code = execute(
+            ["expected-points", "1", "--timezone", "UTC"],
+            provider_factory=lambda _args: provider,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("1-0", stdout.getvalue())
+        self.assertIn(
+            "warning: Estimated missing any-other-score bucket.",
+            stderr.getvalue(),
+        )
 
     def test_markets_command_accepts_chronological_fixture_number(self) -> None:
         stdout = io.StringIO()

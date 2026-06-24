@@ -36,7 +36,7 @@ def execute(
 
     try:
         provider = provider_factory(args)
-        args.handler(args, provider, stdout)
+        args.handler(args, provider, stdout, stderr)
     except (GameError, OddsError, ValueError) as exc:
         print(f"error: {exc}", file=stderr)
         return 2
@@ -133,7 +133,7 @@ def _provider_from_args(args: argparse.Namespace) -> OddsProvider:
 
 
 def _handle_fixtures(
-    args: argparse.Namespace, provider: OddsProvider, stdout: TextIO
+    args: argparse.Namespace, provider: OddsProvider, stdout: TextIO, stderr: TextIO
 ) -> None:
     fixtures = provider.upcoming_fixtures()
     timezone_info = _timezone_from_args(args.timezone)
@@ -141,7 +141,7 @@ def _handle_fixtures(
 
 
 def _handle_markets(
-    args: argparse.Namespace, provider: OddsProvider, stdout: TextIO
+    args: argparse.Namespace, provider: OddsProvider, stdout: TextIO, stderr: TextIO
 ) -> None:
     fixtures = provider.upcoming_fixtures()
     query = combine_fixture_query(args.fixture)
@@ -167,11 +167,13 @@ def _handle_markets(
 
 
 def _handle_expected_points(
-    args: argparse.Namespace, provider: OddsProvider, stdout: TextIO
+    args: argparse.Namespace, provider: OddsProvider, stdout: TextIO, stderr: TextIO
 ) -> None:
     query = combine_fixture_query(args.fixture)
     fixture_id = _resolve_fixture_id(query, provider.upcoming_fixtures())
     market = provider.correct_score_market(fixture_id)
+    for warning in market.warnings:
+        print(f"warning: {warning}", file=stderr)
     if args.tail_max_goals < 0:
         raise GameError("--tail-max-goals cannot be negative.")
     distribution = market.to_probability_distribution(

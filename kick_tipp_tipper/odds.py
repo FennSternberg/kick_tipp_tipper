@@ -81,6 +81,7 @@ class BookmakerAvailableMarkets:
 class CorrectScoreMarket:
     fixture: Fixture
     bookmaker_market: BookmakerMarket
+    warnings: tuple[str, ...] = ()
 
     @property
     def quoted_scorelines(self) -> tuple[ScoreLine, ...]:
@@ -394,12 +395,30 @@ class BovadaProvider:
 
         outcomes = self._parse_correct_score_outcomes(exact_market, fixture)
         any_other = self._find_any_other_correct_score_outcome(event)
+        warnings: list[str] = []
         if any_other is None:
-            raise OddsError(
-                "Bovada returned exact correct-score odds but no any-other-score "
-                f"bucket for {fixture.label}; refusing to normalize incomplete odds."
-            )
-        outcomes.append(any_other)
+            estimated_any_other = self._estimate_missing_any_other_score_outcome(outcomes)
+            if estimated_any_other is None:
+                quoted_probability = sum(1.0 / outcome.price for outcome in outcomes)
+                warnings.append(
+                    "Bovada returned exact correct-score odds but no any-other-score "
+                    f"bucket for {fixture.label}. The quoted exact-score implied "
+                    f"probabilities already sum to {quoted_probability:.1%}, so no "
+                    "positive fallback bucket can be estimated. Normalizing quoted "
+                    "exact-score odds only; unquoted scores are excluded."
+                )
+            else:
+                fallback_probability = 1.0 / estimated_any_other.price
+                outcomes.append(estimated_any_other)
+                warnings.append(
+                    "Bovada returned exact correct-score odds but no any-other-score "
+                    f"bucket for {fixture.label}. Estimated the missing bucket as "
+                    f"1 minus the quoted exact-score implied probabilities "
+                    f"({fallback_probability:.1%}). This fallback ignores bookmaker "
+                    "margin, so treat the result as approximate."
+                )
+        else:
+            outcomes.append(any_other)
 
         return CorrectScoreMarket(
             fixture=fixture,
@@ -409,6 +428,7 @@ class BovadaProvider:
                 market_key="Correct Score",
                 outcomes=tuple(outcomes),
             ),
+            warnings=tuple(warnings),
         )
 
     def available_markets(self, fixture_id: str) -> list[BookmakerAvailableMarkets]:
@@ -584,6 +604,18 @@ class BovadaProvider:
                         continue
                     return PricedOutcome(label=label, price=price)
         return None
+
+    def _estimate_missing_any_other_score_outcome(
+        self, outcomes: Sequence[PricedOutcome]
+    ) -> PricedOutcome | None:
+        quoted_probability = sum(1.0 / outcome.price for outcome in outcomes)
+        fallback_probability = 1.0 - quoted_probability
+        if fallback_probability <= 0:
+            return None
+        return PricedOutcome(
+            label="Estimated Any Other Score",
+            price=1.0 / fallback_probability,
+        )
 
 
 def _bovada_decimal_price(outcome: dict[str, object]) -> float | None:
