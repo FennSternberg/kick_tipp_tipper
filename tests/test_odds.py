@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from http.client import IncompleteRead
 import unittest
+from unittest.mock import patch
 
 from kick_tipp_tipper.game import MatchResult, ScoreLine
 from kick_tipp_tipper.odds import (
     BovadaProvider,
     BookmakerMarket,
     CorrectScoreOutcomeParser,
+    OddsError,
     OddsConverter,
     PricedOutcome,
 )
@@ -82,6 +85,28 @@ class FakeBovadaProvider(BovadaProvider):
 
     def _competition_payload(self):
         return bovada_sample_payload(include_any_other=self.include_any_other)
+
+
+class FakeHttpResponse:
+    def __init__(
+        self,
+        body: bytes = b"[]",
+        *,
+        read_error: Exception | None = None,
+    ) -> None:
+        self.body = body
+        self.read_error = read_error
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        if self.read_error is not None:
+            raise self.read_error
+        return self.body
 
 
 class OddsConverterTest(unittest.TestCase):
@@ -225,6 +250,46 @@ class BovadaProviderTest(unittest.TestCase):
             markets[0].market_keys,
             ("Correct Score", "Correct Score Group"),
         )
+
+    def test_retries_incomplete_bovada_reads(self) -> None:
+        provider = BovadaProvider(retry_attempts=2, retry_backoff_seconds=0)
+
+        with patch(
+            "kick_tipp_tipper.odds.urlopen",
+            side_effect=[
+                FakeHttpResponse(read_error=IncompleteRead(b"partial", 10)),
+                FakeHttpResponse(b"[]"),
+            ],
+        ) as fake_urlopen:
+            payload = provider._get_json("https://example.test")
+
+        self.assertEqual(payload, [])
+        self.assertEqual(fake_urlopen.call_count, 2)
+
+    def test_incomplete_bovada_reads_raise_clean_odds_error(self) -> None:
+        provider = BovadaProvider(retry_attempts=2, retry_backoff_seconds=0)
+
+        with patch(
+            "kick_tipp_tipper.odds.urlopen",
+            side_effect=[
+                FakeHttpResponse(read_error=IncompleteRead(b"partial", 10)),
+                FakeHttpResponse(read_error=IncompleteRead(b"partial", 10)),
+            ],
+        ):
+            with self.assertRaises(OddsError) as error:
+                provider._get_json("https://example.test")
+
+        self.assertIn("Bovada response ended before the full payload was received", str(error.exception))
+        self.assertIn("after 2 attempts", str(error.exception))
+
+    def test_competition_payload_fetches_fresh_data_without_caching(self) -> None:
+        provider = BovadaProvider()
+
+        with patch.object(provider, "_get_json", side_effect=[[], []]) as fake_get_json:
+            provider._competition_payload()
+            provider._competition_payload()
+
+        self.assertEqual(fake_get_json.call_count, 2)
 
 
 if __name__ == "__main__":

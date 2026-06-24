@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.client import HTTPException, IncompleteRead
 import json
 import math
 import re
+import time
 from typing import Iterable, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -372,9 +374,17 @@ class BovadaProvider:
         *,
         competition_path: str = "soccer/fifa-world-cup/fifa-world-cup-matches",
         timeout_seconds: float = 30.0,
+        retry_attempts: int = 3,
+        retry_backoff_seconds: float = 0.5,
     ) -> None:
+        if retry_attempts < 1:
+            raise OddsError("retry_attempts must be positive.")
+        if retry_backoff_seconds < 0:
+            raise OddsError("retry_backoff_seconds cannot be negative.")
         self.competition_path = competition_path.strip("/")
         self.timeout_seconds = timeout_seconds
+        self.retry_attempts = retry_attempts
+        self.retry_backoff_seconds = retry_backoff_seconds
         self.parser = CorrectScoreOutcomeParser()
 
     def upcoming_fixtures(self) -> list[Fixture]:
@@ -460,16 +470,34 @@ class BovadaProvider:
                 "Accept": "application/json",
             },
         )
-        try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise OddsError(f"Bovada returned HTTP {exc.code}: {body}") from exc
-        except URLError as exc:
-            raise OddsError(f"Could not reach Bovada: {exc.reason}") from exc
-        except json.JSONDecodeError as exc:
-            raise OddsError("Bovada response was not valid JSON.") from exc
+        for attempt in range(1, self.retry_attempts + 1):
+            try:
+                with urlopen(request, timeout=self.timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                raise OddsError(f"Bovada returned HTTP {exc.code}: {body}") from exc
+            except URLError as exc:
+                if attempt == self.retry_attempts:
+                    raise OddsError(
+                        f"Could not reach Bovada after {attempt} attempts: {exc.reason}"
+                    ) from exc
+            except (HTTPException, TimeoutError, ConnectionError, OSError) as exc:
+                if attempt == self.retry_attempts:
+                    raise OddsError(_network_read_error_message(exc, attempt)) from exc
+            except json.JSONDecodeError as exc:
+                if attempt == self.retry_attempts:
+                    raise OddsError(
+                        f"Bovada response was not valid JSON after {attempt} attempts."
+                    ) from exc
+
+            self._sleep_before_retry(attempt)
+
+        raise OddsError("Could not retrieve Bovada odds.")
+
+    def _sleep_before_retry(self, failed_attempt: int) -> None:
+        if self.retry_backoff_seconds:
+            time.sleep(self.retry_backoff_seconds * failed_attempt)
 
     def _find_event(self, fixture_id: str) -> dict[str, object]:
         payload = self._competition_payload()
@@ -626,6 +654,19 @@ def _bovada_decimal_price(outcome: dict[str, object]) -> float | None:
     if decimal is None:
         return None
     return float(str(decimal))
+
+
+def _network_read_error_message(exc: Exception, attempts: int) -> str:
+    if isinstance(exc, IncompleteRead):
+        return (
+            "Bovada response ended before the full payload was received after "
+            f"{attempts} attempts ({len(exc.partial)} bytes read on the final "
+            "attempt). Check the connection and try again."
+        )
+    return (
+        "Bovada connection failed while reading the response after "
+        f"{attempts} attempts: {exc}"
+    )
 
 
 def _deduplicate_fixtures(fixtures: Iterable[Fixture]) -> list[Fixture]:
